@@ -22,9 +22,10 @@ class Truck extends Vehicle {
       ? createVector(this.quaiPos.x, -100)
       : createVector(width / 2, -100);
 
-    // Compteur pour spawner les packages
+    // Spawn control for packages
     this.spawnTimer = 0;
-    this.spawnInterval = 60; // Générer un package tous les 60 frames (~1 seconde à 60fps)
+    this.spawnInterval = 60; // Legacy interval (unused when spawning all at dock arrival)
+    this.spawnedThisArrival = false; // Ensure we spawn once when arriving at dock
 
     // Liste des packages générés
     this.packages = [];
@@ -73,6 +74,7 @@ class Truck extends Vehicle {
     this.waitInterval = floor(random(180, 600)); // 3-10 seconds
     // Assigner un nouveau nombre de colis pour le prochain cycle [1..10]
     this.colisCount = floor(random(1, 11));
+    this.spawnedThisArrival = false;
   }
 
   // Méthode pour gérer la période d'attente
@@ -107,6 +109,11 @@ class Truck extends Vehicle {
           this.state = "AU_QUAI";
           this.timeAtQuai = 0;
           this.vel.set(0, 0); // Stop completely
+          // Spawn all packages for this arrival at the assigned spot/front point
+          if (!this.spawnedThisArrival) {
+            this.spawnPackagesAtSpot();
+            this.spawnedThisArrival = true;
+          }
         }
         break;
 
@@ -117,11 +124,6 @@ class Truck extends Vehicle {
 
         this.spawnTimer++;
         this.timeAtQuai++;
-
-        if (this.spawnTimer >= this.spawnInterval && this.packages.length < 5) {
-          this.spawnPackage();
-          this.spawnTimer = 0;
-        }
 
         // Partir après 3 secondes
         if (this.timeAtQuai >= this.maxTimeAtQuai) {
@@ -159,16 +161,76 @@ class Truck extends Vehicle {
   }
 
   spawnPackage() {
-    // Créer un nouveau package près du quai/dock
-    const baseX = this.dock ? this.dock.spawnX : this.pos.x;
-    const baseY = this.dock ? this.dock.spawnY : this.pos.y;
-    let offsetX = random(-50, 50);
-    let offsetY = random(-50, 50);
-    let newPackage = new Package(baseX + offsetX, baseY + offsetY, null);
+    // Créer un nouveau package à la position actuelle (fallback)
+    const baseX = this.pos.x;
+    const baseY = this.pos.y;
+    let newPackage = new Package(baseX, baseY, null);
     this.packages.push(newPackage);
 
     // Retourner le nouveau package (pour qu'il soit ajouté à la liste globale)
     return newPackage;
+  }
+
+  // Spawn all packages for this arrival at the truck's assigned spot front point,
+  // arranging them in a compact grid so they don't overlap.
+  spawnPackagesAtSpot() {
+    // Clear any leftover from previous cycles (safety)
+    this.packages = [];
+
+    const count = this.colisCount || 0;
+    if (count <= 0) return;
+
+    // Determine drop origin: front point for the assigned spot if available
+    let origin = this.quaiPos.copy();
+    let side = this.dock ? this.dock.options.frontSide || "top" : "top";
+    if (this.dock && this.spotId >= 0) {
+      origin = this.dock.getFrontPointForSpot(this.spotId);
+      side = this.dock.options.frontSide || side;
+    }
+
+    // Grid layout parameters
+    const pkgSize = 24; // Updated package size from Package class
+    const spacing = pkgSize + 4; // small gap
+    const cols = 5; // arrange up to 5 per row by default
+    const rows = Math.ceil(count / cols);
+
+    // Direction: place packages inside the dock area relative to front side
+    let dirX = 0,
+      dirY = 0;
+    if (side === "bottom") {
+      dirX = 0;
+      dirY = -1;
+    } else if (side === "top") {
+      dirX = 0;
+      dirY = 1;
+    } else if (side === "left") {
+      dirX = 1;
+      dirY = 0;
+    } else if (side === "right") {
+      dirX = -1;
+      dirY = 0;
+    }
+
+    // Start position so the grid is centered around the origin and grows inward
+    const gridWidth = Math.min(count, cols) * spacing;
+    const startX = origin.x - (gridWidth - spacing) / 2;
+    const startY =
+      origin.y - ((rows - 1) * spacing * (dirY === -1 ? -1 : 1)) / 2; // center by side
+
+    for (let i = 0; i < count; i++) {
+      const c = i % cols;
+      const r = Math.floor(i / cols);
+      let x = startX + c * spacing + dirX * c * 0; // dirX unused for now
+      let y = origin.y + (dirY === 0 ? 0 : dirY * (r * spacing));
+      // Adjust for centering by rows when dirY==0 (left/right sides)
+      if (dirY === 0) {
+        const gridHeight = rows * spacing;
+        y = origin.y - (gridHeight - spacing) / 2 + r * spacing;
+        x = origin.x + dirX * (c * spacing);
+      }
+      const pkg = new Package(x, y, null);
+      this.packages.push(pkg);
+    }
   }
 
   update() {

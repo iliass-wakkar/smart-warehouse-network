@@ -188,4 +188,34 @@ class TruckDock {
   getFrontPointsXY() {
     return this.getFrontPoints().map((p) => ({ x: p.x, y: p.y }));
   }
+
+  // Get the front point for a specific spot id
+  getFrontPointForSpot(spotId) {
+    if (spotId < 0 || spotId >= this.spots.length)
+      return createVector(this.spawnX, this.spawnY);
+    const spot = this.spots[spotId];
+    const side = this.options.frontSide || "top";
+    const offset =
+      this.options.frontPointOffset !== undefined
+        ? this.options.frontPointOffset
+        : this.options.frontPointOffsetY;
+    let cx, cy;
+    if (side === "top") {
+      cx = spot.x;
+      cy = this.y + offset;
+    } else if (side === "bottom") {
+      cx = spot.x;
+      cy = this.y + this.height - offset;
+    } else if (side === "left") {
+      cx = this.x + offset;
+      cy = spot.y;
+    } else if (side === "right") {
+      cx = this.x + this.width - offset;
+      cy = spot.y;
+    } else {
+      cx = spot.x;
+      cy = this.y + offset;
+    }
+    return createVector(cx, cy);
+  }
 }

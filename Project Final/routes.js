@@ -7,6 +7,10 @@ class Routes {
     this.paths = []; // Stocke tous les chemins (liens entre nœuds)
     this.stations = []; // Liste de toutes les stations accessibles
     this.containers = []; // Array of container rectangles for routes areas
+    // Nombre maximum de points (waypoints) d'un chemin simplifié
+    this.maxWaypoints = 14;
+    // Nombre désiré total de points affichés dans l'UI de routes
+    this.desiredPointCount = null; // si défini, on régénère en fonction de ce nombre
 
     this.generateNetwork();
   }
@@ -207,13 +211,28 @@ class Routes {
   buildStationsList() {
     // Extraire toutes les positions uniques comme stations
     this.stations = [];
+    // Simple tableau plat exploitable dans sketch: {x, y, label}
+    this.pointTable = [];
+
     for (let key in this.nodes) {
-      if (Array.isArray(this.nodes[key])) {
-        this.stations.push(...this.nodes[key]);
-      } else {
-        this.stations.push(this.nodes[key]);
+      const value = this.nodes[key];
+      const list = Array.isArray(value) ? value : [value];
+      for (let node of list) {
+        if (!node) continue;
+        this.stations.push(node);
+        this.pointTable.push({ x: node.x, y: node.y, label: key });
       }
     }
+    
+    // Debug logging
+    console.log(`buildStationsList: ${this.stations.length} total points`);
+    let breakdown = {};
+    for (let key in this.nodes) {
+      const value = this.nodes[key];
+      const count = Array.isArray(value) ? value.length : 1;
+      breakdown[key] = count;
+    }
+    console.log('Point breakdown by type:', breakdown);
   }
 
   // Trouver le nœud le plus proche d'une position
@@ -242,6 +261,114 @@ class Routes {
     return nearest;
   }
 
+  // Construct a path from start to end position using A* pathfinding
+  // This ALWAYS uses the route network - never creates direct paths
+  buildPath(startPos, endPos) {
+    const startNode = this.getNearestNode(startPos);
+    const endNode = this.getNearestNode(endPos);
+    if (!startNode || !endNode) {
+      console.warn("Cannot find route nodes for path");
+      return null;
+    }
+
+    // If start and end are very close, create short path through network
+    if (p5.Vector.dist(startPos, endPos) < 10) {
+      return {
+        points: [startPos.copy(), startNode.copy(), endPos.copy()],
+        radius: 30,
+        closed: false,
+      };
+    }
+
+    // A* pathfinding through the network
+    const openSet = [
+      {
+        node: startNode,
+        g: 0,
+        h: p5.Vector.dist(startNode, endNode),
+        f: 0,
+        parent: null,
+      },
+    ];
+    const closedSet = new Set();
+    const cameFrom = new Map();
+
+    while (openSet.length > 0) {
+      // Get node with lowest f
+      openSet.sort((a, b) => a.f - b.f);
+      const current = openSet.shift();
+
+      // Found the goal
+      if (
+        current.node === endNode ||
+        p5.Vector.dist(current.node, endNode) < 10
+      ) {
+        // Reconstruct path through network nodes
+        const pathNodes = [];
+        let node = current.node;
+        while (node) {
+          pathNodes.unshift(node.copy());
+          node = cameFrom.get(node);
+        }
+
+        // Add actual start/end positions
+        if (pathNodes.length > 0) {
+          pathNodes.push(endPos.copy());
+          pathNodes.unshift(startPos.copy());
+        }
+
+        return { points: pathNodes, radius: 30, closed: false };
+      }
+
+      closedSet.add(current.node);
+
+      // Find neighbors through the network edges
+      const neighbors = [];
+      for (let path of this.paths) {
+        if (path.a === current.node) neighbors.push(path.b);
+        if (path.b === current.node) neighbors.push(path.a);
+      }
+
+      for (let neighbor of neighbors) {
+        if (closedSet.has(neighbor)) continue;
+        const tentativeG = current.g + p5.Vector.dist(current.node, neighbor);
+        const existing = openSet.find((n) => n.node === neighbor);
+        if (!existing || tentativeG < existing.g) {
+          const h = p5.Vector.dist(neighbor, endNode);
+          const entry = {
+            node: neighbor,
+            g: tentativeG,
+            h,
+            f: tentativeG + h,
+            parent: current.node,
+          };
+          if (!existing) openSet.push(entry);
+          else Object.assign(existing, entry);
+          cameFrom.set(neighbor, current.node);
+        }
+      }
+    }
+
+    // No path found through network - this shouldn't happen if network is connected
+    console.error(
+      "No path found through route network from",
+      startPos,
+      "to",
+      endPos
+    );
+    // Return path through nearest nodes as emergency fallback
+    return {
+      points: [
+        startPos.copy(),
+        startNode.copy(),
+        endNode.copy(),
+        endPos.copy(),
+      ],
+      radius: 30,
+      closed: false,
+    };
+  }
+
   addRandomCore(opts = {}) {
     const defaults = {
       nodeCount: 40,
@@ -268,6 +395,7 @@ class Routes {
 
     if (cfg.useGrid) {
       // Structured grid layout
+      const perAreaNodes = [];
       for (let areaIdx = 0; areaIdx < targetAreas.length; areaIdx++) {
         const area = targetAreas[areaIdx];
         const spacing = cfg.gridSpacing;
@@ -384,6 +512,35 @@ class Routes {
             if (diagLeftIdx !== -1) {
               this.addPath(node, gridNodes[diagLeftIdx].node);
             }
+          }
+        }
+
+        // Keep track of all nodes created for this area (regular + intersections)
+        perAreaNodes.push(this.nodes.core.slice(gridStart));
+      }
+
+      // Stitch adjacent areas together with a few nearest bridges
+      if (perAreaNodes.length > 1) {
+        const bridgesPerPair = 4;
+        for (let i = 0; i < perAreaNodes.length - 1; i++) {
+          const A = perAreaNodes[i];
+          const B = perAreaNodes[i + 1];
+          const pairs = [];
+          for (let a of A) {
+            for (let b of B) {
+              pairs.push({ a, b, d: p5.Vector.dist(a, b) });
+            }
+          }
+          pairs.sort((u, v) => u.d - v.d);
+          const used = new Set();
+          let added = 0;
+          for (let k = 0; k < pairs.length && added < bridgesPerPair; k++) {
+            const { a, b } = pairs[k];
+            const key = a.x + "," + a.y + "|" + b.x + "," + b.y;
+            if (used.has(key)) continue;
+            this.addPath(a, b);
+            used.add(key);
+            added++;
           }
         }
       }
@@ -545,11 +702,27 @@ class Routes {
       p.copy ? p.copy() : createVector(p.x, p.y)
     );
     if (options.connect === false) return;
-    // Connect each to nearest existing node
+    
+    // Connect each external point to multiple nearby nodes (top 3) for better connectivity
     for (let p of this.nodes[key]) {
-      const nearest = this.getNearestNode(p);
-      if (nearest) this.addPath(p, nearest);
+      // Find all core nodes with distances
+      let coreNodes = this.nodes.core || [];
+      let distances = coreNodes.map(node => ({
+        node: node,
+        dist: p5.Vector.dist(p, node)
+      }));
+      
+      // Sort by distance and connect to top 3 nearest
+      distances.sort((a, b) => a.dist - b.dist);
+      let connectCount = Math.min(3, distances.length);
+      
+      for (let i = 0; i < connectCount; i++) {
+        this.addPath(p, distances[i].node);
+      }
     }
+    
+    // Mettre à jour les listes exposées
+    this.buildStationsList();
   }
 
   // Dessiner les nœuds externes génériques
@@ -618,5 +791,192 @@ class Routes {
   // Obtenir le nombre total de routes
   getRouteCount() {
     return this.paths.length;
+  }
+
+  // ===== Exposition des points pour sketch.js =====
+  // Retourne une copie des vecteurs (p5.Vector)
+  getAllPoints() {
+    return (this.stations || []).map((v) =>
+      v.copy ? v.copy() : createVector(v.x, v.y)
+    );
+  }
+
+  // Retourne uniquement des {x, y}
+  getAllPointsXY() {
+    return (this.pointTable || []).map((p) => ({ x: p.x, y: p.y }));
+  }
+
+  // Retourne la table complète {x, y, label}
+  getPointTable() {
+    return (this.pointTable || []).map((p) => ({
+      x: p.x,
+      y: p.y,
+      label: p.label,
+    }));
+  }
+
+  // ---- Simplification de chemin vers une liste de waypoints ----
+  // Limite le nombre de points tout en conservant le début et la fin
+  limitWaypoints(points, maxCount = this.maxWaypoints) {
+    if (!points || points.length === 0) return [];
+    const n = points.length;
+    if (maxCount <= 2) {
+      const a = points[0];
+      const b = points[n - 1];
+      return [
+        a.copy ? a.copy() : createVector(a.x, a.y),
+        b.copy ? b.copy() : createVector(b.x, b.y),
+      ];
+    }
+    if (n <= maxCount)
+      return points.map((p) => (p.copy ? p.copy() : createVector(p.x, p.y)));
+
+    const result = [];
+    // Always include first and last; sample evenly among intermediates
+    result.push(
+      points[0].copy ? points[0].copy() : createVector(points[0].x, points[0].y)
+    );
+    const slots = maxCount - 2;
+    for (let i = 1; i <= slots; i++) {
+      const t = i / (slots + 1);
+      const idx = Math.round(t * (n - 1));
+      const p = points[idx];
+      result.push(p.copy ? p.copy() : createVector(p.x, p.y));
+    }
+    result.push(
+      points[n - 1].copy
+        ? points[n - 1].copy()
+        : createVector(points[n - 1].x, points[n - 1].y)
+    );
+    return result;
+  }
+
+  // Helper pour créer directement un objet path simplifié
+  buildWaypointPath(startPos, endPos, maxCount = this.maxWaypoints) {
+    const path = this.buildPath(startPos, endPos);
+    if (!path) return null;
+    const pts = this.limitWaypoints(path.points, maxCount);
+    return { points: pts, radius: 20, closed: false };
+  }
+
+  // Construit un chemin COMPOSÉ UNIQUEMENT de nœuds du réseau (sans startPos/endPos)
+  // Utile pour forcer les véhicules à rester strictement sur la route existante
+  buildNodePath(startPos, endPos, maxCount = null) {
+    const startNode = this.getNearestNode(startPos);
+    const endNode = this.getNearestNode(endPos);
+    if (!startNode || !endNode) return null;
+
+    const openSet = [
+      { node: startNode, g: 0, h: p5.Vector.dist(startNode, endNode), f: 0 },
+    ];
+    const cameFrom = new Map();
+    const gScore = new Map();
+    gScore.set(startNode, 0);
+
+    while (openSet.length > 0) {
+      openSet.sort((a, b) => a.g + a.h - (b.g + b.h));
+      const current = openSet.shift();
+      if (current.node === endNode) {
+        // Reconstruct node-only path
+        const nodes = [];
+        let n = current.node;
+        while (n) {
+          nodes.unshift(n.copy());
+          n = cameFrom.get(n) || null;
+        }
+        const limited = maxCount ? this.limitWaypoints(nodes, maxCount) : nodes;
+        return { points: limited, radius: 16, closed: false };
+      }
+
+      // Neighbors via existing edges only
+      const neighbors = [];
+      for (let e of this.paths) {
+        if (e.a === current.node) neighbors.push(e.b);
+        else if (e.b === current.node) neighbors.push(e.a);
+      }
+      for (let nb of neighbors) {
+        const tentative =
+          (gScore.get(current.node) || 0) + p5.Vector.dist(current.node, nb);
+        if (tentative < (gScore.get(nb) ?? Infinity)) {
+          cameFrom.set(nb, current.node);
+          gScore.set(nb, tentative);
+          const h = p5.Vector.dist(nb, endNode);
+          const existing = openSet.find((o) => o.node === nb);
+          if (existing) {
+            existing.g = tentative;
+            existing.h = h;
+          } else {
+            openSet.push({ node: nb, g: tentative, h, f: tentative + h });
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // ====== Contrôle du nombre total de points dans l'UI ======
+  // Calcule combien de points serait généré pour un spacing donné
+  _countPointsForSpacing(spacing, areas) {
+    let total = 0;
+    const targetAreas =
+      areas && areas.length ? areas : [{ x: 300, y: 120, w: 800, h: 700 }];
+    for (let area of targetAreas) {
+      const padding = spacing / 2;
+      const cols = Math.max(0, Math.floor((area.w - padding * 2) / spacing));
+      const rows = Math.max(0, Math.floor((area.h - padding * 2) / spacing));
+      const gridPts = (rows + 1) * (cols + 1);
+      const intersections = rows * cols;
+      total += gridPts + intersections;
+    }
+    return total;
+  }
+
+  // Trouve un spacing approchant un nombre total de points souhaité
+  _computeSpacingForPointCount(desired, areas) {
+    // bornes raisonnables pour l'espacement
+    let lo = 20,
+      hi = 200,
+      best = 80,
+      bestDiff = Infinity;
+    for (let iter = 0; iter < 24; iter++) {
+      const mid = (lo + hi) / 2;
+      const count = this._countPointsForSpacing(mid, areas);
+      const diff = Math.abs(count - desired);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = mid;
+      }
+      if (count > desired) {
+        // trop de points -> espacement plus grand
+        lo = mid;
+      } else {
+        // pas assez de points -> espacement plus petit
+        hi = mid;
+      }
+    }
+    return Math.max(10, Math.round(best));
+  }
+
+  // Reconstruit le réseau core (grille) avec un nombre total désiré de points
+  setPointCount(totalPoints, opts = {}) {
+    this.desiredPointCount = Math.max(2, Math.floor(totalPoints || 0));
+    const areas =
+      opts.areas && Array.isArray(opts.areas) ? opts.areas : this.containers;
+    const spacing = this._computeSpacingForPointCount(
+      this.desiredPointCount,
+      areas
+    );
+    this.addRandomCore({
+      useGrid: true,
+      gridSpacing: spacing,
+      areas: areas && areas.length ? areas : undefined,
+    });
+  }
+
+  // Récupère le nombre courant de points (stations)
+  getCurrentPointCount() {
+    return this.nodes.core && this.nodes.core.length
+      ? this.nodes.core.length
+      : this.getStationCount();
   }
 }

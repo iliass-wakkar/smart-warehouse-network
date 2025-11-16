@@ -2,7 +2,7 @@ class Package {
   constructor(x, y, image) {
     this.pos = createVector(x, y);
     this.image = image;
-    this.size = 32; // Taille du sprite
+    this.size = 24; // Reduced from 32 to 24
 
     // State: "EN_ATTENTE", "EN_TRANSIT", "LIVRÉ"
     this.state = "EN_ATTENTE";

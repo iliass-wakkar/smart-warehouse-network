@@ -6,6 +6,7 @@
 // Images (sprites)
 let imgForklift, imgTruck, imgPackage, imgSlotEmpty, imgSlotFull;
 let showMainPath = false; // toggle to show/hide the old demo path
+let debugMode = false; // toggle debug visualization with 'd' key
 
 // Object Lists
 let forklifts = [];
@@ -26,11 +27,13 @@ let mainPath;
 
 // UI Sliders
 let sliderMaxSpeed, sliderMaxForce, sliderSeparation, sliderAvoidance;
+let sliderRoutePoints; // controls total number of route UI points
+let lastRoutePointsValue = null;
 
 // Port connection settings (per-class distance thresholds)
-let parkingConnectionDistance = 125;   // Distance for Parking ports → route nodes
-let dockConnectionDistance = 125;      // Distance for Truck Dock front points → route nodes
-let warehouseConnectionDistance = 125; // Distance for Warehouse endpoints → route nodes
+let parkingConnectionDistance = 105; // Distance for Parking ports → route nodes
+let dockConnectionDistance = 135; // Distance for Truck Dock front points → route nodes
+let warehouseConnectionDistance = 105; // Distance for Warehouse endpoints → route nodes
 let portConnections = []; // Store connections as {from: Vector, to: Vector}
 
 // ============= PRELOAD =============
@@ -67,6 +70,10 @@ function setup() {
 
   sliderAvoidance = createSlider(0, 1, 0.5, 0.1);
   sliderAvoidance.position(10, 100);
+
+  // Slider to control total number of route points (default at minimum)
+  sliderRoutePoints = createSlider(50, 600, 50, 1);
+  sliderRoutePoints.position(10, 130);
 
   // Créer le chemin principal (routes)
   let pathPoints = [
@@ -105,19 +112,19 @@ function setup() {
     routesContainerAboveStock,
   ]);
 
-  // Remplacer le réseau par un graphe aléatoire (hors parking/dock/stock)
-  // On combine les aires pour générer les nœuds
-  routes.addRandomCore({
-    useGrid: true,
-    gridSpacing: 80,
+  // Construire le réseau par nombre total de points désiré (piloté par slider)
+  lastRoutePointsValue = sliderRoutePoints.value();
+  routes.setContainers([
+    routesContainerLeft,
+    routesContainerCenter,
+    routesContainerAboveStock,
+  ]);
+  routes.setPointCount(lastRoutePointsValue, {
     areas: [
       routesContainerLeft,
       routesContainerCenter,
       routesContainerAboveStock,
     ],
-    kNearest: 2,
-    edgeProbability: 0.25,
-    extraEdges: 120,
   });
 
   // Initialiser les camions
@@ -133,12 +140,9 @@ function setup() {
     rightPorts: { count: 2, startY: 720, gap: 90, offsetX: 12 },
   });
   parkingSpots = parking.getSpots();
-  // Lier les ports du parking aux routes
+  // Lier les ports/endpoints aux routes (initial)
   routes.addExternalPoints("parking_ports", parking.getPorts());
-  // Lier les points frontaux du dock camion aux routes
   routes.addExternalPoints("truckdock_front", truckDock.getFrontPoints());
-
-  // Lier les endpoints de la grille warehouse aux routes
   routes.addExternalPoints("warehouse_endpoints", warehouse.getLineEndpoints());
 
   // Note: Storage slots are NOT part of the route network,
@@ -168,6 +172,11 @@ function draw() {
   let currentForce = sliderMaxForce.value();
   let separationWeight = sliderSeparation.value();
   let avoidanceWeight = sliderAvoidance.value();
+  const desiredPts = sliderRoutePoints.value();
+  if (desiredPts !== lastRoutePointsValue) {
+    rebuildRoutesNetwork(desiredPts);
+    lastRoutePointsValue = desiredPts;
+  }
 
   // ========== AFFICHAGE DU STATIQUE ==========
 
@@ -230,6 +239,11 @@ function draw() {
       if (!packages.includes(pkg)) {
         packages.push(pkg);
         pkg.state = "EN_ATTENTE";
+        console.log(
+          "Package added to global list at",
+          pkg.pos.x.toFixed(1),
+          pkg.pos.y.toFixed(1)
+        );
       }
     }
   }
@@ -240,6 +254,16 @@ function draw() {
     // Mettre à jour les paramètres depuis les sliders
     forklift.maxSpeed = currentSpeed;
     forklift.maxForce = currentForce;
+
+    // Build A* path if needed
+    if (
+      !forklift.waypoints &&
+      (forklift.state === "COLLECTE" ||
+        forklift.state === "LIVRAISON" ||
+        forklift.state === "RETOUR")
+    ) {
+      forklift.buildPathToTarget(routes);
+    }
 
     // Passer les autres forklifts pour le comportement de séparation
     forklift.update(forklifts);
@@ -286,6 +310,19 @@ function draw() {
   text("Max Force: " + currentForce.toFixed(2), 10, 55);
   text("Separation: " + separationWeight.toFixed(2), 10, 85);
   text("Avoidance: " + avoidanceWeight.toFixed(2), 10, 115);
+  text("Route Points: " + desiredPts, 10, 145);
+
+  // Debug mode indicator
+  push();
+  fill(debugMode ? color(0, 255, 0) : color(255, 0, 0));
+  textSize(14);
+  textAlign(RIGHT);
+  text(
+    "Debug: " + (debugMode ? "ON (press 'd')" : "OFF (press 'd')"),
+    width - 10,
+    20
+  );
+  pop();
 }
 
 // ============= HELPER FUNCTIONS =============
@@ -347,9 +384,11 @@ function initializeTrucks() {
     let spot = truckDock.spots[i];
     let truck = new Truck(spot.x, -500, imgTruck, truckDock);
     truck.assignSpot(spot);
-    truck.waitTimer = floor(random(0, 600)); // Random initial delay (0-10 sec)
-    truck.waitInterval = floor(random(180, 600)); // Random wait duration (3-10 sec)
-    truck.isWaiting = true;
+    // Start first cycle immediately so packages appear quickly
+    truck.waitTimer = 0;
+    truck.waitInterval = floor(random(180, 600));
+    truck.isWaiting = false;
+    truck.state = "EN_ROUTE";
     truckDock.reserveSpot(spot.id, truck);
     trucks.push(truck);
   }
@@ -375,5 +414,34 @@ class Path {
       vertex(p.x, p.y);
     }
     endShape();
+  }
+}
+
+// Reconstruire le réseau des routes quand le nombre de points change
+function rebuildRoutesNetwork(pointCount) {
+  // Rebuild core grid with requested total points across containers
+  routes.setPointCount(pointCount);
+
+  // Re-link external points (parking, truck dock, warehouse endpoints)
+  routes.addExternalPoints("parking_ports", parking.getPorts());
+  routes.addExternalPoints("truckdock_front", truckDock.getFrontPoints());
+  routes.addExternalPoints("warehouse_endpoints", warehouse.getLineEndpoints());
+
+  // Recompute proximity connections for visualization
+  connectPortsToRoutes();
+
+  // Clear current forklift paths so they rebuild against the new network
+  for (let f of forklifts) {
+    f.currentPath = null;
+    if (typeof f.waypointIndex !== "undefined") f.waypointIndex = 0;
+  }
+}
+
+// Toggle debug mode with 'd' key
+function keyPressed() {
+  if (key === "d" || key === "D") {
+    debugMode = !debugMode;
+    Vehicle.debug = debugMode;
+    console.log("Debug mode:", debugMode ? "ON" : "OFF");
   }
 }

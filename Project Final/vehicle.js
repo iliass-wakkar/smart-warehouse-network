@@ -173,6 +173,90 @@ class Vehicle {
     this.acc.add(force);
   }
 
+  // Path following for open polylines
+  // path: { points: p5.Vector[], radius: number, closed?: boolean }
+  follow(path) {
+    if (!path || !path.points || path.points.length < 2)
+      return createVector(0, 0);
+
+    let predict = this.vel.copy();
+    predict.normalize();
+    predict.mult(25);
+    let predictPos = p5.Vector.add(this.pos, predict);
+
+    let normal = null;
+    let target = null;
+    let record = Infinity;
+
+    const pts = path.points;
+    const n = pts.length;
+    const last = path.closed ? n : n - 1;
+
+    for (let i = 0; i < last; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % n];
+      let normalPoint = findProjectionPF(predictPos, a, b);
+
+      const minX = Math.min(a.x, b.x) - 0.0001;
+      const maxX = Math.max(a.x, b.x) + 0.0001;
+      const minY = Math.min(a.y, b.y) - 0.0001;
+      const maxY = Math.max(a.y, b.y) + 0.0001;
+      if (
+        normalPoint.x < minX ||
+        normalPoint.x > maxX ||
+        normalPoint.y < minY ||
+        normalPoint.y > maxY
+      ) {
+        normalPoint = b.copy();
+      }
+
+      const d = p5.Vector.dist(predictPos, normalPoint);
+      if (d < record) {
+        record = d;
+        normal = normalPoint;
+        let dir = p5.Vector.sub(b, a);
+        dir.normalize();
+        dir.mult(25);
+        target = normal.copy();
+        target.add(dir);
+      }
+    }
+
+    // Debug visualization matching 5-3-PathFollowingComplex style
+    if (Vehicle.debug && normal && target) {
+      push();
+      // Line from vehicle position to predicted position
+      stroke(0);
+      fill(0);
+      line(this.pos.x, this.pos.y, predictPos.x, predictPos.y);
+
+      // Predicted position (small black circle)
+      ellipse(predictPos.x, predictPos.y, 4, 4);
+
+      // Normal point (projected point on path - black circle)
+      stroke(0);
+      fill(0);
+      ellipse(normal.x, normal.y, 4, 4);
+
+      // Line from predicted to target
+      line(predictPos.x, predictPos.y, target.x, target.y);
+
+      // Target point (red if off-path, otherwise normal)
+      if (record > (path.radius || 20)) {
+        fill(255, 0, 0);
+      }
+      noStroke();
+      ellipse(target.x, target.y, 8, 8);
+      pop();
+    }
+
+    const radius = path.radius !== undefined ? path.radius : 20;
+    if (record > radius) {
+      return this.seek(target || predictPos);
+    }
+    return createVector(0, 0);
+  }
+
   update() {
     this.vel.add(this.acc);
     this.vel.limit(this.maxSpeed);
@@ -219,4 +303,13 @@ class Vehicle {
       this.pos.y = height + this.r;
     }
   }
+}
+
+// Helper for path-following projection
+function findProjectionPF(p, a, b) {
+  let ap = p5.Vector.sub(p, a);
+  let ab = p5.Vector.sub(b, a);
+  ab.normalize();
+  ab.mult(ap.dot(ab));
+  return p5.Vector.add(a, ab);
 }
