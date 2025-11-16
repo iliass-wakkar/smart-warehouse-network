@@ -71,44 +71,44 @@ function setup() {
   const sliderY = 30; // Y position for all sliders
   const sliderWidth = 150; // Width of each slider
   const sliderSpacing = 180; // Horizontal spacing between sliders
-  
+
   sliderMaxSpeed = createSlider(1, 8, 4, 0.1);
   sliderMaxSpeed.position(10, sliderY);
-  sliderMaxSpeed.style('width', sliderWidth + 'px');
+  sliderMaxSpeed.style("width", sliderWidth + "px");
 
   sliderMaxForce = createSlider(0.1, 0.5, 0.2, 0.01);
   sliderMaxForce.position(10 + sliderSpacing, sliderY);
-  sliderMaxForce.style('width', sliderWidth + 'px');
+  sliderMaxForce.style("width", sliderWidth + "px");
 
   // Slider to control total number of route points (default at minimum)
   sliderRoutePoints = createSlider(50, 600, 50, 1);
   sliderRoutePoints.position(10 + sliderSpacing * 2, sliderY);
-  sliderRoutePoints.style('width', sliderWidth + 'px');
+  sliderRoutePoints.style("width", sliderWidth + "px");
 
   // Slider to control truck arrival frequency (arrivals per minute)
   sliderTruckFrequency = createSlider(5, 40, 10, 1);
   sliderTruckFrequency.position(10 + sliderSpacing * 3, sliderY);
-  sliderTruckFrequency.style('width', sliderWidth + 'px');
+  sliderTruckFrequency.style("width", sliderWidth + "px");
 
   // Slider for waypoint reach radius
   sliderWaypointRadius = createSlider(10, 50, 25, 1);
   sliderWaypointRadius.position(10 + sliderSpacing * 4, sliderY);
-  sliderWaypointRadius.style('width', sliderWidth + 'px');
+  sliderWaypointRadius.style("width", sliderWidth + "px");
 
   // Slider for obstacle check distance
   sliderObstacleDistance = createSlider(40, 150, 80, 5);
   sliderObstacleDistance.position(10 + sliderSpacing * 5, sliderY);
-  sliderObstacleDistance.style('width', sliderWidth + 'px');
+  sliderObstacleDistance.style("width", sliderWidth + "px");
 
   // Slider for max replan attempts
   sliderMaxReplans = createSlider(1, 5, 3, 1);
   sliderMaxReplans.position(10 + sliderSpacing * 6, sliderY);
-  sliderMaxReplans.style('width', sliderWidth + 'px');
+  sliderMaxReplans.style("width", sliderWidth + "px");
 
   // Slider for number of forklifts
   sliderForkliftCount = createSlider(1, 10, 3, 1);
   sliderForkliftCount.position(10 + sliderSpacing * 7, sliderY);
-  sliderForkliftCount.style('width', sliderWidth + 'px');
+  sliderForkliftCount.style("width", sliderWidth + "px");
 
   // Créer le chemin principal (routes)
   let pathPoints = [
@@ -295,7 +295,7 @@ function draw() {
   const waypointRadius = sliderWaypointRadius.value();
   const obstacleDistance = sliderObstacleDistance.value();
   const maxReplans = sliderMaxReplans.value();
-  
+
   for (let i = 0; i < forklifts.length; i++) {
     let forklift = forklifts[i];
     // Mettre à jour les paramètres depuis les sliders
@@ -335,7 +335,7 @@ function draw() {
   textSize(11);
   const labelY = 15;
   const sliderSpacing = 180;
-  
+
   text("Max Speed", 10 + 75, labelY);
   text("Max Force", 10 + sliderSpacing + 75, labelY);
   text("Route Points", 10 + sliderSpacing * 2 + 75, labelY);
@@ -344,16 +344,28 @@ function draw() {
   text("Obstacle Dist", 10 + sliderSpacing * 5 + 75, labelY);
   text("Max Replans", 10 + sliderSpacing * 6 + 75, labelY);
   text("Forklifts", 10 + sliderSpacing * 7 + 75, labelY);
-  
+
   // Draw current values below labels
   textSize(10);
   fill(200, 255, 200);
   text(currentSpeed.toFixed(1), 10 + 75, labelY + 45);
   text(currentForce.toFixed(2), 10 + sliderSpacing + 75, labelY + 45);
   text(desiredPts, 10 + sliderSpacing * 2 + 75, labelY + 45);
-  text(sliderTruckFrequency.value() + "/min", 10 + sliderSpacing * 3 + 75, labelY + 45);
-  text(sliderWaypointRadius.value() + "px", 10 + sliderSpacing * 4 + 75, labelY + 45);
-  text(sliderObstacleDistance.value() + "px", 10 + sliderSpacing * 5 + 75, labelY + 45);
+  text(
+    sliderTruckFrequency.value() + "/min",
+    10 + sliderSpacing * 3 + 75,
+    labelY + 45
+  );
+  text(
+    sliderWaypointRadius.value() + "px",
+    10 + sliderSpacing * 4 + 75,
+    labelY + 45
+  );
+  text(
+    sliderObstacleDistance.value() + "px",
+    10 + sliderSpacing * 5 + 75,
+    labelY + 45
+  );
   text(sliderMaxReplans.value(), 10 + sliderSpacing * 6 + 75, labelY + 45);
   text(sliderForkliftCount.value(), 10 + sliderSpacing * 7 + 75, labelY + 45);
   pop();
@@ -415,7 +427,7 @@ function draw() {
     let totalScheduleStates = 0;
     let forkliftStates = { ATTENTE: 0, COLLECTE: 0, LIVRAISON: 0, RETOUR: 0 };
     let totalReplans = 0;
-    
+
     for (let f of forklifts) {
       if (f.plannedSchedule && f.plannedSchedule.length > 0) {
         forkliftsWithSchedule++;
@@ -447,15 +459,27 @@ function draw() {
       height - 110
     );
     text(`Total Replans: ${totalReplans}`, 15, height - 95);
-    
+
     // Forklift states breakdown
     fill(150, 200, 255);
-    text(`States - ATTENTE:${forkliftStates.ATTENTE} COLLECTE:${forkliftStates.COLLECTE}`, 15, height - 75);
-    text(`LIVRAISON:${forkliftStates.LIVRAISON} RETOUR:${forkliftStates.RETOUR}`, 15, height - 60);
+    text(
+      `States - ATTENTE:${forkliftStates.ATTENTE} COLLECTE:${forkliftStates.COLLECTE}`,
+      15,
+      height - 75
+    );
+    text(
+      `LIVRAISON:${forkliftStates.LIVRAISON} RETOUR:${forkliftStates.RETOUR}`,
+      15,
+      height - 60
+    );
 
     // Legend
     fill(255, 200, 0);
-    text("🟡 Orange circle = Waypoint radius | Orange ring = Obstacle range", 15, height - 40);
+    text(
+      "🟡 Orange circle = Waypoint radius | Orange ring = Obstacle range",
+      15,
+      height - 40
+    );
     fill(0, 255, 255);
     text("🔵 Cyan = Reserved edges | Green dots = Waypoints", 15, height - 25);
     fill(255, 100, 0);
@@ -580,7 +604,7 @@ function rebuildRoutesNetwork(pointCount) {
 // Adjust number of forklifts dynamically
 function adjustForkliftCount(targetCount) {
   const currentCount = forklifts.length;
-  
+
   if (targetCount > currentCount) {
     // Add new forklifts
     for (let i = currentCount; i < targetCount; i++) {
@@ -592,10 +616,12 @@ function adjustForkliftCount(targetCount) {
         // Create additional parking spot if needed
         spot = createVector(245 + (i % 3) * 60, 750 - Math.floor(i / 3) * 60);
       }
-      
+
       let forklift = new Forklift(spot.x, spot.y, imgForklift);
       forklift.id = i + 1;
-      forklift.parkingPos = spot.copy ? spot.copy() : createVector(spot.x, spot.y);
+      forklift.parkingPos = spot.copy
+        ? spot.copy()
+        : createVector(spot.x, spot.y);
       forklift.state = "ATTENTE";
       forklifts.push(forklift);
       console.log(`Added forklift ${forklift.id} at parking spot`);
@@ -604,7 +630,7 @@ function adjustForkliftCount(targetCount) {
     // Remove excess forklifts (only remove idle ones first)
     const toRemove = currentCount - targetCount;
     let removed = 0;
-    
+
     // First pass: remove idle forklifts
     for (let i = forklifts.length - 1; i >= 0 && removed < toRemove; i--) {
       if (forklifts[i].state === "ATTENTE" && !forklifts[i].targetPackage) {
@@ -613,7 +639,7 @@ function adjustForkliftCount(targetCount) {
         removed++;
       }
     }
-    
+
     // Second pass: remove any remaining if still over count
     while (forklifts.length > targetCount) {
       const removed = forklifts.pop();

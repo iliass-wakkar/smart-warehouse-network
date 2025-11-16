@@ -190,7 +190,7 @@ class Forklift extends Vehicle {
       case "ATTENTE":
         // Stay at current position if idle - only return to parking if far from it and no task
         const distanceToParking = p5.Vector.dist(this.pos, this.parkingPos);
-        
+
         // Only move back to parking if we're far away (e.g., at warehouse after delivery)
         // and we've been idle for a while
         if (distanceToParking > 200) {
