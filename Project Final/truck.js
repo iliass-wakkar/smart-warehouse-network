@@ -41,6 +41,10 @@ class Truck extends Vehicle {
     this.isWaiting = false;
     this.waitTimer = 0;
     this.waitInterval = 0;
+    
+    // Truck arrival frequency control
+    this.targetArrivalFrequency = 10; // default 10 arrivals/min
+    this.avgWaitFrames = 360; // 3600 frames/min ÷ 10 = 360 frames between arrivals
 
     // Nombre de colis (packages) pour ce camion [1..10]
     this.colisCount = floor(random(1, 11));
@@ -62,6 +66,18 @@ class Truck extends Vehicle {
     );
   }
 
+  // Set arrival frequency (arrivals per minute)
+  setArrivalFrequency(arrivalsPerMinute) {
+    // Convert arrivals per minute to frames between arrivals
+    // 60 fps * 60 seconds = 3600 frames per minute
+    const framesPerMinute = 3600;
+    const avgFramesBetween = framesPerMinute / arrivalsPerMinute;
+    
+    // Store for use when starting wait
+    this.targetArrivalFrequency = arrivalsPerMinute;
+    this.avgWaitFrames = avgFramesBetween;
+  }
+
   // Méthode pour démarrer une période d'attente avant la prochaine arrivée
   startWaiting() {
     this.pos.set(this.quaiPos.x, -500);
@@ -71,7 +87,13 @@ class Truck extends Vehicle {
     this.timeAtQuai = 0;
     this.isWaiting = true;
     this.waitTimer = 0;
-    this.waitInterval = floor(random(180, 600)); // 3-10 seconds
+    
+    // Calculate wait interval based on frequency (with some randomness ±20%)
+    const baseWait = this.avgWaitFrames || 360; // default 10/min if not set
+    const minWait = baseWait * 0.8;
+    const maxWait = baseWait * 1.2;
+    this.waitInterval = floor(random(minWait, maxWait));
+    
     // Assigner un nouveau nombre de colis pour le prochain cycle [1..10]
     this.colisCount = floor(random(1, 11));
     this.spawnedThisArrival = false;

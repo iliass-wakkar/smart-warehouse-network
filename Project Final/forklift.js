@@ -188,23 +188,33 @@ class Forklift extends Vehicle {
 
     switch (this.state) {
       case "ATTENTE":
-        // Stay at parking - only move if we have waypoints
-        if (
-          this.hasValidPath &&
-          this.waypoints &&
-          this.currentWaypointIndex < this.waypoints.length
-        ) {
-          let target = this.waypoints[this.currentWaypointIndex];
-          force = this.arrive(target);
-          if (p5.Vector.dist(this.pos, target) < this.waypointReachRadius) {
-            this.currentWaypointIndex++;
+        // Stay at current position if idle - only return to parking if far from it and no task
+        const distanceToParking = p5.Vector.dist(this.pos, this.parkingPos);
+        
+        // Only move back to parking if we're far away (e.g., at warehouse after delivery)
+        // and we've been idle for a while
+        if (distanceToParking > 200) {
+          // We're far from parking, go back gradually
+          if (!this.hasValidPath) {
+            // Build path back to parking only once
+            this.state = "RETOUR";
+            force = createVector(0, 0);
+          } else if (
+            this.waypoints &&
+            this.currentWaypointIndex < this.waypoints.length
+          ) {
+            let target = this.waypoints[this.currentWaypointIndex];
+            force = this.arrive(target);
+            if (p5.Vector.dist(this.pos, target) < this.waypointReachRadius) {
+              this.currentWaypointIndex++;
+            }
+          } else {
+            // Finished waypoints, arrive at parking
+            force = this.arrive(this.parkingPos);
           }
-        } else if (!this.hasValidPath) {
-          // No valid path - don't move
-          force = createVector(0, 0);
         } else {
-          // Finished waypoints, arrive at parking
-          force = this.arrive(this.parkingPos);
+          // Close to parking or at work area - just stay put
+          force = createVector(0, 0);
         }
         force.add(avoidForce);
         break;
@@ -283,7 +293,7 @@ class Forklift extends Vehicle {
             }
             this.heldPackage = null;
             this.targetSlot = null;
-            this.state = "RETOUR";
+            this.state = "ATTENTE"; // Go to ATTENTE instead of RETOUR - ready for next task
             this.waypoints = null;
             this.currentWaypointIndex = 0;
             this.hasValidPath = false;
@@ -296,9 +306,9 @@ class Forklift extends Vehicle {
         break;
 
       case "RETOUR":
-        // Follow waypoints back to parking - only move if we have a valid path
+        // Build path to parking if needed
         if (!this.hasValidPath) {
-          // No valid path - don't move
+          // Will trigger buildPathToTarget in sketch which builds path to parkingPos
           force = createVector(0, 0);
         } else if (
           this.waypoints &&
@@ -362,6 +372,17 @@ class Forklift extends Vehicle {
     // Debug visualization for waypoint following
     if (Vehicle.debug && this.waypoints) {
       push();
+
+      // Draw waypoint reach radius around current position
+      noFill();
+      stroke(255, 255, 0, 100);
+      strokeWeight(1);
+      circle(this.pos.x, this.pos.y, this.waypointReachRadius * 2);
+
+      // Draw obstacle detection range
+      stroke(255, 100, 0, 80);
+      strokeWeight(1);
+      circle(this.pos.x, this.pos.y, this.obstacleCheckDistance * 2);
 
       // Draw all waypoints as small circles
       noStroke();
