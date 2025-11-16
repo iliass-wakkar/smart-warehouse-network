@@ -135,6 +135,88 @@ class Vehicle {
   }
 
   // Comportement Separation : on garde ses distances par rapport aux voisins
+  // Obstacle avoidance behavior - looks ahead and steers away from obstacles/other vehicles
+  avoid(obstacles) {
+    // Look ahead vector (30 frames ahead)
+    let ahead = this.vel.copy();
+    ahead.mult(30);
+
+    // Shorter look ahead (15 frames)
+    let ahead2 = this.vel.copy();
+    ahead2.mult(15);
+
+    let pointAuBoutDeAhead = p5.Vector.add(this.pos, ahead);
+    let pointAuBoutDeAhead2 = p5.Vector.add(this.pos, ahead2);
+
+    // Debug visualization
+    if (Vehicle.debug) {
+      this.drawVector(this.pos, ahead, "yellow");
+      this.drawVector(this.pos, ahead2, "purple");
+
+      push();
+      fill("red");
+      circle(pointAuBoutDeAhead.x, pointAuBoutDeAhead.y, 10);
+      fill("lightblue");
+      circle(pointAuBoutDeAhead2.x, pointAuBoutDeAhead2.y, 10);
+
+      // Draw avoidance zone
+      stroke(255, 50);
+      strokeWeight(this.r);
+      line(this.pos.x, this.pos.y, pointAuBoutDeAhead.x, pointAuBoutDeAhead.y);
+      pop();
+    }
+
+    // Find closest obstacle from the list
+    let closestObstacle = null;
+    let minDist = Infinity;
+
+    for (let obstacle of obstacles) {
+      if (obstacle === this) continue; // Skip self
+      let d = p5.Vector.dist(this.pos, obstacle.pos);
+      if (d < minDist) {
+        minDist = d;
+        closestObstacle = obstacle;
+      }
+    }
+
+    if (!closestObstacle) return createVector(0, 0);
+
+    // Calculate distances from look-ahead points to closest obstacle
+    let distance1 = p5.Vector.dist(pointAuBoutDeAhead, closestObstacle.pos);
+    let distance2 = p5.Vector.dist(pointAuBoutDeAhead2, closestObstacle.pos);
+    let distance3 = p5.Vector.dist(this.pos, closestObstacle.pos);
+
+    let closestPoint = pointAuBoutDeAhead;
+    let minDistance = distance1;
+
+    if (distance2 < minDistance) {
+      minDistance = distance2;
+      closestPoint = pointAuBoutDeAhead2;
+    }
+    if (distance3 < minDistance) {
+      minDistance = distance3;
+      closestPoint = this.pos;
+    }
+
+    // Check if we're in collision range
+    let obstacleRadius = closestObstacle.r || 30;
+    let avoidanceZone = obstacleRadius + this.r;
+
+    if (minDistance < avoidanceZone) {
+      // Calculate avoidance force - steer away from obstacle
+      let force = p5.Vector.sub(closestPoint, closestObstacle.pos);
+
+      if (Vehicle.debug) {
+        this.drawVector(closestObstacle.pos, force, "yellow");
+      }
+
+      force.setMag(this.maxForce);
+      return force;
+    }
+
+    return createVector(0, 0);
+  }
+
   separate(vehicles) {
     let desiredSeparation = this.r * 2;
     let steer = createVector(0, 0);
@@ -302,6 +384,23 @@ class Vehicle {
     } else if (this.pos.y < -this.r) {
       this.pos.y = height + this.r;
     }
+  }
+
+  // Draw a vector for debug visualization
+  drawVector(pos, v, color) {
+    push();
+    strokeWeight(3);
+    stroke(color);
+    line(pos.x, pos.y, pos.x + v.x, pos.y + v.y);
+    // Draw arrow at the end of the vector
+    let arrowSize = 5;
+    translate(pos.x + v.x, pos.y + v.y);
+    rotate(v.heading());
+    translate(-arrowSize / 2, 0);
+    fill(color);
+    noStroke();
+    triangle(0, arrowSize / 2, 0, -arrowSize / 2, arrowSize, 0);
+    pop();
   }
 }
 

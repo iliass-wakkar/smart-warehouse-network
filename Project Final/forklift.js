@@ -20,24 +20,111 @@ class Forklift extends Vehicle {
     this.hasValidPath = false; // Only move if we have a valid route
     this.separateWeight = 1.5;
 
+    // Obstacle detection and stopping
+    this.obstacleDetected = false; // Flag when obstacle is in the way
+    this.stoppedForObstacle = false; // Flag when stopped for obstacle
+    this.obstacleCheckDistance = 80; // Distance to look ahead for obstacles
+    this.recalculateTimer = 0; // Frames to wait before recalculating
+    this.recalculateDelay = 30; // Wait 0.5 seconds before recalculating (at 60fps)
+
     // Stop drifting by default (override Vehicle's initial velocity)
     if (this.vel) this.vel.set(0, 0);
   }
 
+  // Check if there's an obstacle blocking our path
+  detectObstacleAhead(otherForklifts) {
+    if (!this.waypoints || this.currentWaypointIndex >= this.waypoints.length) {
+      return false;
+    }
+
+    // Check direction we're heading
+    let target = this.waypoints[this.currentWaypointIndex];
+    let directionToTarget = p5.Vector.sub(target, this.pos);
+    let distToTarget = directionToTarget.mag();
+
+    // Only check if we're moving
+    if (distToTarget < 5) return false;
+
+    directionToTarget.normalize();
+
+    // Check each other forklift
+    for (let other of otherForklifts) {
+      if (other === this) continue;
+
+      let toOther = p5.Vector.sub(other.pos, this.pos);
+      let distToOther = toOther.mag();
+
+      // Is the other forklift close enough to be a problem?
+      if (distToOther > this.obstacleCheckDistance) continue;
+
+      // Is the other forklift in our path direction?
+      toOther.normalize();
+      let alignment = directionToTarget.dot(toOther);
+
+      // If alignment > 0.7, they're in our path (within ~45 degrees)
+      if (alignment > 0.7 && distToOther < this.obstacleCheckDistance) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   runFSM(otherForklifts = []) {
     let force = createVector(0, 0);
-    let separateForce = createVector(0, 0);
+    let avoidForce = createVector(0, 0);
 
-    // Appliquer la séparation pour éviter les autres forklifts
+    // Detect obstacles ahead
+    this.obstacleDetected = this.detectObstacleAhead(otherForklifts);
+
+    // If obstacle detected and we're moving, stop and prepare to recalculate
+    if (this.obstacleDetected && !this.stoppedForObstacle) {
+      // Stop the forklift
+      this.vel.mult(0.5); // Brake
+      this.stoppedForObstacle = true;
+      this.recalculateTimer = 0;
+      console.log(`[Forklift ${this.id}] Obstacle detected! Stopping...`);
+    }
+
+    // If stopped for obstacle, wait then recalculate route
+    if (this.stoppedForObstacle) {
+      this.recalculateTimer++;
+
+      // Still detecting obstacle - keep waiting
+      if (this.obstacleDetected) {
+        this.recalculateTimer = 0; // Reset timer
+        return createVector(0, 0); // Don't move
+      }
+
+      // Obstacle cleared - wait a bit then recalculate
+      if (this.recalculateTimer >= this.recalculateDelay) {
+        console.log(
+          `[Forklift ${this.id}] Obstacle cleared! Recalculating route...`
+        );
+        this.hasValidPath = false; // Force path recalculation
+        this.waypoints = null;
+        this.stoppedForObstacle = false;
+        this.recalculateTimer = 0;
+      } else {
+        // Still waiting
+        return createVector(0, 0);
+      }
+    }
+
+    // Apply obstacle avoidance to avoid other forklifts
     if (otherForklifts.length > 0) {
-      separateForce = this.separate(otherForklifts);
-      separateForce.mult(this.separateWeight);
+      avoidForce = this.avoid(otherForklifts);
+      avoidForce.mult(2.5); // Strong avoidance
     }
 
     switch (this.state) {
       case "ATTENTE":
         // Stay at parking - only move if we have waypoints
-        if (this.hasValidPath && this.waypoints && this.currentWaypointIndex < this.waypoints.length) {
+        if (
+          this.hasValidPath &&
+          this.waypoints &&
+          this.currentWaypointIndex < this.waypoints.length
+        ) {
           let target = this.waypoints[this.currentWaypointIndex];
           force = this.arrive(target);
           if (p5.Vector.dist(this.pos, target) < this.waypointReachRadius) {
@@ -50,6 +137,7 @@ class Forklift extends Vehicle {
           // Finished waypoints, arrive at parking
           force = this.arrive(this.parkingPos);
         }
+        force.add(avoidForce);
         break;
 
       case "COLLECTE":
@@ -58,7 +146,10 @@ class Forklift extends Vehicle {
           if (!this.hasValidPath) {
             // No valid path - don't move
             force = createVector(0, 0);
-          } else if (this.waypoints && this.currentWaypointIndex < this.waypoints.length) {
+          } else if (
+            this.waypoints &&
+            this.currentWaypointIndex < this.waypoints.length
+          ) {
             // Follow the A* path waypoints
             let target = this.waypoints[this.currentWaypointIndex];
             force = this.seek(target);
@@ -70,6 +161,8 @@ class Forklift extends Vehicle {
             force = this.seek(this.targetPackage.pos);
           }
 
+          force.add(avoidForce);
+
           // Reached package?
           let distance = p5.Vector.dist(this.pos, this.targetPackage.pos);
           if (distance < 50) {
@@ -80,6 +173,9 @@ class Forklift extends Vehicle {
             this.waypoints = null;
             this.currentWaypointIndex = 0;
             this.hasValidPath = false;
+            this.obstacleDetected = false;
+            this.stoppedForObstacle = false;
+            // Note: reservations will be cleared when building new path
           }
         }
         break;
@@ -90,7 +186,10 @@ class Forklift extends Vehicle {
           if (!this.hasValidPath) {
             // No valid path - don't move
             force = createVector(0, 0);
-          } else if (this.waypoints && this.currentWaypointIndex < this.waypoints.length) {
+          } else if (
+            this.waypoints &&
+            this.currentWaypointIndex < this.waypoints.length
+          ) {
             // Follow the A* path waypoints
             let target = this.waypoints[this.currentWaypointIndex];
             force = this.arrive(target);
@@ -101,6 +200,8 @@ class Forklift extends Vehicle {
             // Finished waypoints - arrive directly at slot
             force = this.arrive(this.targetSlot.pos);
           }
+
+          force.add(avoidForce);
 
           let distance = p5.Vector.dist(this.pos, this.targetSlot.pos);
           if (distance < 50) {
@@ -115,6 +216,8 @@ class Forklift extends Vehicle {
             this.waypoints = null;
             this.currentWaypointIndex = 0;
             this.hasValidPath = false;
+            this.obstacleDetected = false;
+            this.stoppedForObstacle = false;
           }
         }
         break;
@@ -124,7 +227,10 @@ class Forklift extends Vehicle {
         if (!this.hasValidPath) {
           // No valid path - don't move
           force = createVector(0, 0);
-        } else if (this.waypoints && this.currentWaypointIndex < this.waypoints.length) {
+        } else if (
+          this.waypoints &&
+          this.currentWaypointIndex < this.waypoints.length
+        ) {
           let target = this.waypoints[this.currentWaypointIndex];
           force = this.arrive(target);
           if (p5.Vector.dist(this.pos, target) < this.waypointReachRadius) {
@@ -134,7 +240,9 @@ class Forklift extends Vehicle {
           // Finished waypoints - arrive at parking
           force = this.arrive(this.parkingPos);
         }
-        
+
+        force.add(avoidForce);
+
         let distance = p5.Vector.dist(this.pos, this.parkingPos);
         if (distance < 50) {
           this.state = "ATTENTE";
@@ -144,9 +252,6 @@ class Forklift extends Vehicle {
         }
         break;
     }
-
-    // Combiner la force principale avec la force de séparation
-    force.add(separateForce);
 
     return force;
   }
@@ -182,7 +287,7 @@ class Forklift extends Vehicle {
     // Debug visualization for waypoint following
     if (Vehicle.debug && this.waypoints) {
       push();
-      
+
       // Draw all waypoints as small circles
       noStroke();
       fill(0, 255, 0, 100);
@@ -190,7 +295,7 @@ class Forklift extends Vehicle {
         let wp = this.waypoints[i];
         circle(wp.x, wp.y, 8);
       }
-      
+
       // Draw current target waypoint larger
       if (this.currentWaypointIndex < this.waypoints.length) {
         let target = this.waypoints[this.currentWaypointIndex];
@@ -201,7 +306,7 @@ class Forklift extends Vehicle {
         noStroke();
         circle(target.x, target.y, 16);
       }
-      
+
       // Draw path line
       stroke(0, 255, 0, 150);
       strokeWeight(2);
@@ -212,9 +317,22 @@ class Forklift extends Vehicle {
         vertex(this.waypoints[i].x, this.waypoints[i].y);
       }
       endShape();
-      
+
       pop();
-    }    // Dessiner la trajectoire
+    }
+
+    // Show obstacle warning when stopped
+    if (this.stoppedForObstacle) {
+      push();
+      fill(255, 0, 0, 150);
+      noStroke();
+      circle(this.pos.x, this.pos.y, this.r * 3);
+      fill(255);
+      textAlign(CENTER, CENTER);
+      textSize(12);
+      text("STOP", this.pos.x, this.pos.y - this.r * 2);
+      pop();
+    } // Dessiner la trajectoire
     this.path.forEach((p, index) => {
       if (!(index % 3)) {
         stroke(this.pathColor);
@@ -285,22 +403,51 @@ class Forklift extends Vehicle {
 
     if (!targetPos) return;
 
-    console.log(`[Forklift ${this.id}] Building path for ${this.state} from (${this.pos.x.toFixed(0)}, ${this.pos.y.toFixed(0)}) to (${targetPos.x.toFixed(0)}, ${targetPos.y.toFixed(0)})`);
+    console.log(
+      `[Forklift ${this.id}] Building path for ${
+        this.state
+      } from (${this.pos.x.toFixed(0)}, ${this.pos.y.toFixed(
+        0
+      )}) to (${targetPos.x.toFixed(0)}, ${targetPos.y.toFixed(0)})`
+    );
 
-    // Use A* to build path through route network
-    let path = routesNetwork.buildPath(this.pos, targetPos);
+    // Clear any old reservations for this forklift
+    routesNetwork.clearReservations(this.id);
+
+    // Use A* to build path through route network, passing our ID to avoid reserved paths
+    let path = routesNetwork.buildPath(this.pos, targetPos, this.id);
 
     if (path && path.points && path.points.length > 0) {
       this.waypoints = path.points;
       this.currentWaypointIndex = 0;
       this.hasValidPath = true;
-      console.log(`[Forklift ${this.id}] ✓ Built path with ${path.points.length} waypoints for ${this.state}`);
+
+      // Reserve this path so other forklifts avoid it
+      routesNetwork.reserveWaypoints(this.waypoints, this.id);
+
+      console.log(
+        `[Forklift ${this.id}] ✓ Built path with ${path.points.length} waypoints for ${this.state}`
+      );
     } else {
-      console.error(`[Forklift ${this.id}] ✗ FAILED to build path for state ${this.state}`);
-      console.log(`  Start nearest node:`, routesNetwork.getNearestNode(this.pos));
-      console.log(`  End nearest node:`, routesNetwork.getNearestNode(targetPos));
-      console.log(`  Total nodes in network:`, routesNetwork.stations ? routesNetwork.stations.length : 0);
-      console.log(`  Total paths/edges:`, routesNetwork.paths ? routesNetwork.paths.length : 0);
+      console.error(
+        `[Forklift ${this.id}] ✗ FAILED to build path for state ${this.state}`
+      );
+      console.log(
+        `  Start nearest node:`,
+        routesNetwork.getNearestNode(this.pos)
+      );
+      console.log(
+        `  End nearest node:`,
+        routesNetwork.getNearestNode(targetPos)
+      );
+      console.log(
+        `  Total nodes in network:`,
+        routesNetwork.stations ? routesNetwork.stations.length : 0
+      );
+      console.log(
+        `  Total paths/edges:`,
+        routesNetwork.paths ? routesNetwork.paths.length : 0
+      );
       this.waypoints = null;
       this.hasValidPath = false;
     }

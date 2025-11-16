@@ -12,6 +12,10 @@ class Routes {
     // Nombre désiré total de points affichés dans l'UI de routes
     this.desiredPointCount = null; // si défini, on régénère en fonction de ce nombre
 
+    // Route reservation system
+    this.reservedPaths = new Map(); // Map of "x1,y1->x2,y2" to forklift ID
+    this.pathReservationTime = 180; // frames to keep reservation (3 seconds at 60fps)
+
     this.generateNetwork();
   }
 
@@ -19,8 +23,56 @@ class Routes {
     this.containers = [rect]; // Backward compat: single container
   }
 
-  setContainers(rects) {
-    this.containers = rects; // Array of containers
+  // Reserve a path segment for a forklift
+  reservePath(nodeA, nodeB, forkliftId) {
+    const key1 = `${nodeA.x.toFixed(0)},${nodeA.y.toFixed(
+      0
+    )}->${nodeB.x.toFixed(0)},${nodeB.y.toFixed(0)}`;
+    const key2 = `${nodeB.x.toFixed(0)},${nodeB.y.toFixed(
+      0
+    )}->${nodeA.x.toFixed(0)},${nodeA.y.toFixed(0)}`;
+    this.reservedPaths.set(key1, {
+      id: forkliftId,
+      expires: frameCount + this.pathReservationTime,
+    });
+    this.reservedPaths.set(key2, {
+      id: forkliftId,
+      expires: frameCount + this.pathReservationTime,
+    });
+  }
+
+  // Check if a path segment is reserved by another forklift
+  isPathReserved(nodeA, nodeB, forkliftId) {
+    const key = `${nodeA.x.toFixed(0)},${nodeA.y.toFixed(0)}->${nodeB.x.toFixed(
+      0
+    )},${nodeB.y.toFixed(0)}`;
+    const reservation = this.reservedPaths.get(key);
+    if (!reservation) return false;
+    if (reservation.expires < frameCount) {
+      this.reservedPaths.delete(key);
+      return false;
+    }
+    return reservation.id !== forkliftId;
+  }
+
+  // Reserve entire path for a forklift
+  reserveWaypoints(waypoints, forkliftId) {
+    for (let i = 0; i < waypoints.length - 1; i++) {
+      this.reservePath(waypoints[i], waypoints[i + 1], forkliftId);
+    }
+  }
+
+  // Clear all reservations for a forklift
+  clearReservations(forkliftId) {
+    for (let [key, reservation] of this.reservedPaths.entries()) {
+      if (reservation.id === forkliftId) {
+        this.reservedPaths.delete(key);
+      }
+    }
+  }
+
+  setContainers(containers) {
+    this.containers = containers; // Array of containers
   }
 
   drawContainer() {
@@ -223,7 +275,7 @@ class Routes {
         this.pointTable.push({ x: node.x, y: node.y, label: key });
       }
     }
-    
+
     // Debug logging
     console.log(`buildStationsList: ${this.stations.length} total points`);
     let breakdown = {};
@@ -232,7 +284,7 @@ class Routes {
       const count = Array.isArray(value) ? value.length : 1;
       breakdown[key] = count;
     }
-    console.log('Point breakdown by type:', breakdown);
+    console.log("Point breakdown by type:", breakdown);
   }
 
   // Trouver le nœud le plus proche d'une position
@@ -263,7 +315,7 @@ class Routes {
 
   // Construct a path from start to end position using A* pathfinding
   // This ALWAYS uses the route network - never creates direct paths
-  buildPath(startPos, endPos) {
+  buildPath(startPos, endPos, forkliftId = null) {
     const startNode = this.getNearestNode(startPos);
     const endNode = this.getNearestNode(endPos);
     if (!startNode || !endNode) {
@@ -280,7 +332,7 @@ class Routes {
       };
     }
 
-    // A* pathfinding through the network
+    // A* pathfinding through the network, avoiding reserved paths
     const openSet = [
       {
         node: startNode,
@@ -331,6 +383,15 @@ class Routes {
 
       for (let neighbor of neighbors) {
         if (closedSet.has(neighbor)) continue;
+
+        // Skip if this path segment is reserved by another forklift
+        if (
+          forkliftId &&
+          this.isPathReserved(current.node, neighbor, forkliftId)
+        ) {
+          continue;
+        }
+
         const tentativeG = current.g + p5.Vector.dist(current.node, neighbor);
         const existing = openSet.find((n) => n.node === neighbor);
         if (!existing || tentativeG < existing.g) {
@@ -702,25 +763,25 @@ class Routes {
       p.copy ? p.copy() : createVector(p.x, p.y)
     );
     if (options.connect === false) return;
-    
+
     // Connect each external point to multiple nearby nodes (top 3) for better connectivity
     for (let p of this.nodes[key]) {
       // Find all core nodes with distances
       let coreNodes = this.nodes.core || [];
-      let distances = coreNodes.map(node => ({
+      let distances = coreNodes.map((node) => ({
         node: node,
-        dist: p5.Vector.dist(p, node)
+        dist: p5.Vector.dist(p, node),
       }));
-      
+
       // Sort by distance and connect to top 3 nearest
       distances.sort((a, b) => a.dist - b.dist);
       let connectCount = Math.min(3, distances.length);
-      
+
       for (let i = 0; i < connectCount; i++) {
         this.addPath(p, distances[i].node);
       }
     }
-    
+
     // Mettre à jour les listes exposées
     this.buildStationsList();
   }
