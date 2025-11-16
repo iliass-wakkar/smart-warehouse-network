@@ -266,7 +266,7 @@ function draw() {
     }
 
     // Passer les autres forklifts pour le comportement de séparation
-    forklift.update(forklifts);
+    forklift.update(forklifts, routes);
     forklift.display();
   }
 
@@ -323,6 +323,58 @@ function draw() {
     20
   );
   pop();
+
+  // Show time-aware planning stats if debug enabled
+  if (debugMode) {
+    push();
+    fill(0, 200);
+    noStroke();
+    rect(10, height - 120, 300, 110, 5);
+
+    fill(255);
+    textAlign(LEFT, TOP);
+    textSize(12);
+    text("Time-Aware Planning Status:", 15, height - 115);
+
+    let forkliftsWithSchedule = 0;
+    let totalScheduleStates = 0;
+    for (let f of forklifts) {
+      if (f.plannedSchedule && f.plannedSchedule.length > 0) {
+        forkliftsWithSchedule++;
+        totalScheduleStates += f.plannedSchedule.length;
+      }
+    }
+
+    textSize(10);
+    text(
+      `Forklifts w/ Schedule: ${forkliftsWithSchedule}/${forklifts.length}`,
+      15,
+      height - 95
+    );
+    text(`Total Schedule States: ${totalScheduleStates}`, 15, height - 80);
+    text(
+      `Reserved Nodes: ${
+        routes.nodeTimeReservations ? routes.nodeTimeReservations.size : 0
+      }`,
+      15,
+      height - 65
+    );
+    text(
+      `Reserved Edges: ${
+        routes.edgeTimeReservations ? routes.edgeTimeReservations.size : 0
+      }`,
+      15,
+      height - 50
+    );
+
+    // Legend
+    fill(255, 200, 0);
+    text("🟡 = Node reservation (future)", 15, height - 30);
+    fill(0, 255, 255);
+    text("🔵 = Edge reservation (in use)", 15, height - 15);
+
+    pop();
+  }
 }
 
 // ============= HELPER FUNCTIONS =============

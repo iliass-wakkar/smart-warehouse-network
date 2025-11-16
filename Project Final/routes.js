@@ -16,6 +16,16 @@ class Routes {
     this.reservedPaths = new Map(); // Map of "x1,y1->x2,y2" to forklift ID
     this.pathReservationTime = 180; // frames to keep reservation (3 seconds at 60fps)
 
+    // Time-aware (space-time) reservation system
+    // Node reservations: key "x,y" -> Map<timeStep, forkliftId>
+    this.nodeTimeReservations = new Map();
+    // Edge reservations: key "x1,y1|x2,y2" (unordered) -> Map<timeStep, forkliftId>
+    this.edgeTimeReservations = new Map();
+    // Time step granularity in frames (use 1 frame granularity)
+    this.timeStepFrames = 1;
+    // Planning horizon cap (frames) to avoid unbounded searches
+    this.maxPlanningHorizon = 1200; // ~20s at 60fps
+
     this.generateNetwork();
   }
 
@@ -73,6 +83,326 @@ class Routes {
 
   setContainers(containers) {
     this.containers = containers; // Array of containers
+  }
+
+  // ======== Space-Time Reservation Helpers ========
+  _nodeKey(node) {
+    return `${node.x.toFixed(0)},${node.y.toFixed(0)}`;
+  }
+
+  _edgeKey(a, b) {
+    const k1 = `${a.x.toFixed(0)},${a.y.toFixed(0)}`;
+    const k2 = `${b.x.toFixed(0)},${b.y.toFixed(0)}`;
+    return k1 < k2 ? `${k1}|${k2}` : `${k2}|${k1}`;
+  }
+
+  _getOrCreate(map, key) {
+    if (!map.has(key)) map.set(key, new Map());
+    return map.get(key);
+  }
+
+  clearTimeReservationsFor(forkliftId) {
+    // Clear node reservations
+    for (let [nodeKey, timeMap] of this.nodeTimeReservations.entries()) {
+      for (let [t, id] of timeMap.entries()) {
+        if (id === forkliftId) timeMap.delete(t);
+      }
+      if (timeMap.size === 0) this.nodeTimeReservations.delete(nodeKey);
+    }
+    // Clear edge reservations
+    for (let [edgeKey, timeMap] of this.edgeTimeReservations.entries()) {
+      for (let [t, id] of timeMap.entries()) {
+        if (id === forkliftId) timeMap.delete(t);
+      }
+      if (timeMap.size === 0) this.edgeTimeReservations.delete(edgeKey);
+    }
+  }
+
+  isNodeReservedAt(node, timeStep, forkliftId) {
+    const nodeKey = this._nodeKey(node);
+    const timeMap = this.nodeTimeReservations.get(nodeKey);
+    if (!timeMap) return false;
+    const holder = timeMap.get(timeStep);
+    return holder && holder !== forkliftId;
+  }
+
+  isEdgeReservedAt(a, b, timeStep, forkliftId) {
+    const edgeKey = this._edgeKey(a, b);
+    const timeMap = this.edgeTimeReservations.get(edgeKey);
+    if (!timeMap) return false;
+    const holder = timeMap.get(timeStep);
+    return holder && holder !== forkliftId;
+  }
+
+  reserveNodeAt(node, timeStep, forkliftId) {
+    const nodeKey = this._nodeKey(node);
+    const timeMap = this._getOrCreate(this.nodeTimeReservations, nodeKey);
+    timeMap.set(timeStep, forkliftId);
+  }
+
+  reserveEdgeAt(a, b, timeStep, forkliftId) {
+    const edgeKey = this._edgeKey(a, b);
+    const timeMap = this._getOrCreate(this.edgeTimeReservations, edgeKey);
+    timeMap.set(timeStep, forkliftId);
+  }
+
+  // ======== Time-Aware Path Planning (Space-Time A*) ========
+  planTimeAwarePath(startPos, endPos, forkliftId, options = {}) {
+    const speed = Math.max(0.1, options.speed || 4); // px/frame
+    const allowDetour = options.allowDetour !== false; // Allow detours by default
+    const detourAttempts = options.detourAttempts || 0;
+    const maxDetourAttempts = 3;
+
+    const startNode = this.getNearestNode(startPos);
+    const endNode = this.getNearestNode(endPos);
+    if (!startNode || !endNode) return null;
+
+    const startFrame = Math.max(
+      0,
+      options.startFrame || (typeof frameCount !== "undefined" ? frameCount : 0)
+    );
+    const timeStep = Math.max(1, this.timeStepFrames | 0);
+    const maxHorizon = Math.max(100, this.maxPlanningHorizon | 0);
+
+    // Precompute neighbor map for performance
+    const neighborsMap = new Map();
+    const getNeighbors = (node) => {
+      const key = this._nodeKey(node);
+      if (neighborsMap.has(key)) return neighborsMap.get(key);
+      const list = [];
+      for (let e of this.paths) {
+        if (e.a === node) list.push(e.b);
+        else if (e.b === node) list.push(e.a);
+      }
+      neighborsMap.set(key, list);
+      return list;
+    };
+
+    // Priority queue using array (small scale); f-score sort
+    const open = [];
+    const pushOpen = (item) => {
+      open.push(item);
+      open.sort((u, v) => u.f - v.f);
+    };
+
+    const startState = { node: startNode, t: startFrame };
+    const h0 = p5.Vector.dist(startNode, endNode) / speed;
+    pushOpen({
+      node: startNode,
+      t: startFrame,
+      g: 0,
+      h: h0,
+      f: h0,
+      parent: null,
+    });
+
+    const visited = new Map(); // key: nodeKey@t -> g
+    const keyState = (node, t) => `${this._nodeKey(node)}@${t}`;
+    const cameFrom = new Map(); // key -> prevKey
+
+    let expansions = 0;
+    const maxExpansions = 15000;
+
+    while (open.length > 0) {
+      const current = open.shift();
+      const { node, t, g } = current;
+      expansions++;
+      if (expansions > maxExpansions) break;
+
+      // Goal condition: at endNode within horizon
+      if (node === endNode) {
+        // Reconstruct schedule of states
+        const seq = [];
+        let ck = keyState(node, t);
+        while (ck) {
+          const [nk, ts] = ck.split("@");
+          const [x, y] = nk.split(",").map((n) => Number(n));
+          seq.unshift({ x, y, t: Number(ts) });
+          ck = cameFrom.get(ck) || null;
+        }
+
+        // Convert to waypoints: include start/end positions
+        const points = [];
+        // Start pos
+        points.push(
+          startPos.copy ? startPos.copy() : createVector(startPos.x, startPos.y)
+        );
+        // Add network nodes when position changes (compress waits)
+        let lastKey = null;
+        for (let s of seq) {
+          const k = `${s.x},${s.y}`;
+          if (k !== lastKey) {
+            points.push(createVector(s.x, s.y));
+            lastKey = k;
+          }
+        }
+        // End pos
+        points.push(
+          endPos.copy ? endPos.copy() : createVector(endPos.x, endPos.y)
+        );
+
+        // Reserve the schedule: reserve node occupancy and edge times
+        // First clear any previous time reservations for this forklift
+        this.clearTimeReservationsFor(forkliftId);
+        for (let i = 0; i < seq.length; i++) {
+          const s = seq[i];
+          // Reserve node at time s.t
+          this.reserveNodeAt({ x: s.x, y: s.y }, s.t, forkliftId);
+          if (i < seq.length - 1) {
+            const s2 = seq[i + 1];
+            const sameNode = s.x === s2.x && s.y === s2.y;
+            if (!sameNode) {
+              // Reserve edge during traversal times (exclusive of start t, inclusive of arrival t)
+              for (let tt = s.t + 1; tt <= s2.t; tt += timeStep) {
+                this.reserveEdgeAt(
+                  { x: s.x, y: s.y },
+                  { x: s2.x, y: s2.y },
+                  tt,
+                  forkliftId
+                );
+              }
+              // Reserve arrival node at s2.t as well
+              this.reserveNodeAt({ x: s2.x, y: s2.y }, s2.t, forkliftId);
+            }
+          }
+        }
+
+        return { points, radius: 30, closed: false, schedule: seq };
+      }
+
+      // Prune if beyond horizon
+      if (t - startFrame > maxHorizon) continue;
+
+      const ckey = keyState(node, t);
+      if (visited.has(ckey) && visited.get(ckey) <= g) continue;
+      visited.set(ckey, g);
+
+      // 1) Wait action: stay on node for one timestep
+      const tWait = t + timeStep;
+      if (!this.isNodeReservedAt(node, tWait, forkliftId)) {
+        const h = p5.Vector.dist(node, endNode) / speed;
+        const g2 = g + timeStep;
+        const f = g2 + h;
+        const nkey = keyState(node, tWait);
+        if (!visited.has(nkey) || visited.get(nkey) > g2) {
+          pushOpen({ node: node, t: tWait, g: g2, h, f, parent: ckey });
+          cameFrom.set(nkey, ckey);
+        }
+      }
+
+      // 2) Move actions to neighbors (respect reservations)
+      const neighbors = getNeighbors(node);
+      for (let nb of neighbors) {
+        const dist = p5.Vector.dist(node, nb);
+        const travelFrames = Math.max(1, Math.ceil(dist / speed));
+        const arriveT = t + travelFrames;
+        // Check edge reservation for all frames (t+1..arriveT)
+        let blocked = false;
+        for (let tt = t + 1; tt <= arriveT; tt += timeStep) {
+          if (this.isEdgeReservedAt(node, nb, tt, forkliftId)) {
+            blocked = true;
+            break;
+          }
+        }
+        if (blocked) continue;
+        // Check arrival node reservation
+        if (this.isNodeReservedAt(nb, arriveT, forkliftId)) continue;
+
+        const h = p5.Vector.dist(nb, endNode) / speed;
+        const g2 = g + travelFrames;
+        const f = g2 + h;
+        const nkey = keyState(nb, arriveT);
+        if (!visited.has(nkey) || visited.get(nkey) > g2) {
+          pushOpen({ node: nb, t: arriveT, g: g2, h, f, parent: ckey });
+          cameFrom.set(nkey, ckey);
+        }
+      }
+    }
+
+    // Failed to find time-aware path
+    // Try detour through alternative nearby nodes
+    if (allowDetour && detourAttempts < maxDetourAttempts) {
+      console.log(
+        `[Routes] No direct path found for forklift ${forkliftId}, trying detour (attempt ${
+          detourAttempts + 1
+        }/${maxDetourAttempts})`
+      );
+
+      // Find alternative intermediate nodes near the midpoint
+      const midPoint = createVector(
+        (startPos.x + endPos.x) / 2,
+        (startPos.y + endPos.y) / 2
+      );
+
+      // Get all nodes sorted by distance from midpoint
+      const allNodes = this.stations || [];
+      const candidates = allNodes
+        .filter((n) => n !== startNode && n !== endNode)
+        .map((n) => ({
+          node: n,
+          dist: p5.Vector.dist(n, midPoint),
+        }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 5); // Try top 5 nearest nodes
+
+      // Try routing through each candidate waypoint
+      for (let candidate of candidates) {
+        const waypoint = candidate.node;
+
+        // Try path: start -> waypoint -> end
+        const leg1 = this.planTimeAwarePath(startPos, waypoint, forkliftId, {
+          speed,
+          startFrame: options.startFrame,
+          allowDetour: false, // Don't nest detours
+          detourAttempts: detourAttempts + 1,
+        });
+
+        if (!leg1) continue;
+
+        // Calculate arrival time at waypoint
+        const waypointArrivalFrame =
+          leg1.schedule && leg1.schedule.length > 0
+            ? leg1.schedule[leg1.schedule.length - 1].t
+            : (options.startFrame || 0) + 60;
+
+        const leg2 = this.planTimeAwarePath(waypoint, endPos, forkliftId, {
+          speed,
+          startFrame: waypointArrivalFrame,
+          allowDetour: false,
+          detourAttempts: detourAttempts + 1,
+        });
+
+        if (leg2) {
+          // Successfully found detour path!
+          console.log(
+            `[Routes] ✓ Detour found via waypoint (${waypoint.x.toFixed(
+              0
+            )}, ${waypoint.y.toFixed(0)})`
+          );
+
+          // Merge the two legs
+          const mergedPoints = [...leg1.points];
+          // Remove duplicate waypoint
+          if (leg2.points.length > 1) {
+            mergedPoints.push(...leg2.points.slice(1));
+          }
+
+          const mergedSchedule = [...(leg1.schedule || [])];
+          if (leg2.schedule && leg2.schedule.length > 1) {
+            mergedSchedule.push(...leg2.schedule.slice(1));
+          }
+
+          return {
+            points: mergedPoints,
+            radius: 30,
+            closed: false,
+            schedule: mergedSchedule,
+          };
+        }
+      }
+    }
+
+    return null;
   }
 
   drawContainer() {
@@ -684,6 +1014,11 @@ class Routes {
 
     // 3. Dessiner les nœuds externes (ports/points exposés)
     this.drawExternalNodes();
+
+    // 4. Debug: Draw time-aware reservations if debug mode enabled
+    if (Vehicle.debug) {
+      this.drawTimeReservations();
+    }
   }
 
   drawNodes() {
@@ -806,6 +1141,120 @@ class Routes {
     fill(200);
     noStroke();
     for (let v of arr) circle(v.x, v.y, 8);
+    pop();
+  }
+
+  // Debug visualization for time-aware reservations
+  drawTimeReservations() {
+    const now = typeof frameCount !== "undefined" ? frameCount : 0;
+    const futureWindow = 120; // Show next 2 seconds of reservations
+
+    push();
+
+    // 1. Draw reserved nodes with time info
+    for (let [nodeKey, timeMap] of this.nodeTimeReservations.entries()) {
+      const [x, y] = nodeKey.split(",").map((n) => Number(n));
+
+      // Check if any reservation in near future
+      let nearestReservation = null;
+      let nearestT = Infinity;
+      for (let [t, id] of timeMap.entries()) {
+        if (t >= now && t < now + futureWindow && t < nearestT) {
+          nearestT = t;
+          nearestReservation = id;
+        }
+      }
+
+      if (nearestReservation !== null) {
+        // Draw reservation indicator
+        const framesUntil = nearestT - now;
+        const alpha = map(framesUntil, 0, futureWindow, 255, 50);
+
+        // Outer ring showing time until reservation
+        noFill();
+        stroke(255, 100, 0, alpha);
+        strokeWeight(2);
+        const ringSize = map(framesUntil, 0, futureWindow, 20, 12);
+        circle(x, y, ringSize);
+
+        // Inner filled circle
+        fill(255, 150, 0, alpha * 0.5);
+        noStroke();
+        circle(x, y, 6);
+
+        // Show forklift ID and frames until
+        if (framesUntil < 60) {
+          fill(255, 200, 0);
+          noStroke();
+          textSize(9);
+          textAlign(CENTER, BOTTOM);
+          text(
+            `F${nearestReservation}:${Math.ceil(framesUntil / 60)}s`,
+            x,
+            y - 12
+          );
+        }
+      }
+    }
+
+    // 2. Draw reserved edges with time info
+    for (let [edgeKey, timeMap] of this.edgeTimeReservations.entries()) {
+      const [key1, key2] = edgeKey.split("|");
+      const [x1, y1] = key1.split(",").map((n) => Number(n));
+      const [x2, y2] = key2.split(",").map((n) => Number(n));
+
+      // Check if any reservation in near future
+      let hasNearReservation = false;
+      let earliestT = Infinity;
+      let reserverId = null;
+      for (let [t, id] of timeMap.entries()) {
+        if (t >= now && t < now + futureWindow) {
+          hasNearReservation = true;
+          if (t < earliestT) {
+            earliestT = t;
+            reserverId = id;
+          }
+        }
+      }
+
+      if (hasNearReservation) {
+        const framesUntil = earliestT - now;
+        const alpha = map(framesUntil, 0, futureWindow, 200, 30);
+
+        stroke(0, 255, 255, alpha);
+        strokeWeight(3);
+        line(x1, y1, x2, y2);
+
+        // Draw arrow showing direction and ID
+        if (framesUntil < 30) {
+          const midX = (x1 + x2) / 2;
+          const midY = (y1 + y2) / 2;
+          fill(0, 255, 255);
+          noStroke();
+          textSize(8);
+          textAlign(CENTER, CENTER);
+          text(`F${reserverId}`, midX, midY);
+        }
+      }
+    }
+
+    // 3. Draw reservation statistics in corner
+    const nodeReservationCount = this.nodeTimeReservations.size;
+    const edgeReservationCount = this.edgeTimeReservations.size;
+
+    fill(0, 200);
+    noStroke();
+    rect(width - 250, 10, 240, 80, 5);
+
+    fill(255);
+    textAlign(LEFT, TOP);
+    textSize(12);
+    text("Time-Aware Reservations:", width - 245, 15);
+    textSize(10);
+    text(`Reserved Nodes: ${nodeReservationCount}`, width - 245, 35);
+    text(`Reserved Edges: ${edgeReservationCount}`, width - 245, 50);
+    text(`Frame: ${now}`, width - 245, 65);
+
     pop();
   }
 

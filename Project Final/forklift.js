@@ -27,8 +27,17 @@ class Forklift extends Vehicle {
     this.recalculateTimer = 0; // Frames to wait before recalculating
     this.recalculateDelay = 30; // Wait 0.5 seconds before recalculating (at 60fps)
 
+    // Conflict detection and replanning
+    this.conflictDetected = false; // Flag when reservation conflict detected
+    this.replanAttempts = 0; // Track replanning attempts
+    this.maxReplanAttempts = 3; // Max attempts before giving up
+
     // Stop drifting by default (override Vehicle's initial velocity)
     if (this.vel) this.vel.set(0, 0);
+
+    // Optional time-aware schedule returned by planner
+    this.plannedSchedule = null; // array of {x,y,t}
+    this.plannedStartFrame = 0;
   }
 
   // Check if there's an obstacle blocking our path
@@ -70,9 +79,69 @@ class Forklift extends Vehicle {
     return false;
   }
 
-  runFSM(otherForklifts = []) {
+  // Check if our planned path has reservation conflicts ahead
+  detectPathConflict(routesNetwork) {
+    if (!this.plannedSchedule || this.plannedSchedule.length === 0)
+      return false;
+    if (!routesNetwork || typeof routesNetwork.isNodeReservedAt !== "function")
+      return false;
+
+    const now = typeof frameCount !== "undefined" ? frameCount : 0;
+    const lookAhead = 60; // Check next 1 second
+
+    // Check if any of our scheduled nodes are now reserved by others
+    for (let i = 0; i < this.plannedSchedule.length; i++) {
+      const state = this.plannedSchedule[i];
+      if (state.t < now || state.t > now + lookAhead) continue;
+
+      const node = { x: state.x, y: state.y };
+      if (routesNetwork.isNodeReservedAt(node, state.t, this.id)) {
+        console.log(
+          `[Forklift ${this.id}] ⚠️ Conflict detected at node (${state.x}, ${state.y}) at t=${state.t}`
+        );
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  runFSM(otherForklifts = [], routesNetwork = null) {
     let force = createVector(0, 0);
     let avoidForce = createVector(0, 0);
+
+    // If we have a time-aware plan, do not depart before planned start
+    if (this.plannedSchedule && this.plannedSchedule.length > 0) {
+      const now = typeof frameCount !== "undefined" ? frameCount : 0;
+      const startT = this.plannedSchedule[0].t || this.plannedStartFrame || 0;
+      if (now < startT) {
+        // Hold position until scheduled departure
+        return createVector(0, 0);
+      }
+    }
+
+    // Check for path conflicts and trigger replanning if needed
+    if (routesNetwork && this.hasValidPath && !this.conflictDetected) {
+      this.conflictDetected = this.detectPathConflict(routesNetwork);
+      if (
+        this.conflictDetected &&
+        this.replanAttempts < this.maxReplanAttempts
+      ) {
+        console.log(
+          `[Forklift ${
+            this.id
+          }] 🔄 Conflict! Attempting automatic replan (attempt ${
+            this.replanAttempts + 1
+          }/${this.maxReplanAttempts})`
+        );
+        this.hasValidPath = false;
+        this.waypoints = null;
+        this.plannedSchedule = null;
+        this.replanAttempts++;
+        this.conflictDetected = false;
+        return createVector(0, 0); // Stop briefly while replanning
+      }
+    }
 
     // Detect obstacles ahead
     this.obstacleDetected = this.detectObstacleAhead(otherForklifts);
@@ -175,6 +244,8 @@ class Forklift extends Vehicle {
             this.hasValidPath = false;
             this.obstacleDetected = false;
             this.stoppedForObstacle = false;
+            this.replanAttempts = 0; // Reset replan counter on success
+            this.conflictDetected = false;
             // Note: reservations will be cleared when building new path
           }
         }
@@ -218,6 +289,8 @@ class Forklift extends Vehicle {
             this.hasValidPath = false;
             this.obstacleDetected = false;
             this.stoppedForObstacle = false;
+            this.replanAttempts = 0; // Reset replan counter on success
+            this.conflictDetected = false;
           }
         }
         break;
@@ -249,6 +322,8 @@ class Forklift extends Vehicle {
           this.waypoints = null;
           this.currentWaypointIndex = 0;
           this.hasValidPath = false;
+          this.replanAttempts = 0; // Reset replan counter on success
+          this.conflictDetected = false;
         }
         break;
     }
@@ -256,8 +331,8 @@ class Forklift extends Vehicle {
     return force;
   }
 
-  update(otherForklifts = []) {
-    let force = this.runFSM(otherForklifts);
+  update(otherForklifts = [], routesNetwork = null) {
+    let force = this.runFSM(otherForklifts, routesNetwork);
     this.applyForce(force);
 
     this.vel.add(this.acc);
@@ -318,6 +393,52 @@ class Forklift extends Vehicle {
       }
       endShape();
 
+      // Draw time-aware schedule if available
+      if (this.plannedSchedule && this.plannedSchedule.length > 0) {
+        const now = typeof frameCount !== "undefined" ? frameCount : 0;
+
+        // Draw schedule timeline
+        for (let i = 0; i < this.plannedSchedule.length; i++) {
+          const s = this.plannedSchedule[i];
+          const isPast = s.t < now;
+          const isCurrent = i === this.currentWaypointIndex;
+
+          // Color based on status
+          if (isPast) {
+            fill(100, 100, 100, 80); // Gray for past
+          } else if (isCurrent) {
+            fill(255, 255, 0, 200); // Yellow for current
+          } else {
+            fill(0, 200, 255, 150); // Cyan for future
+          }
+
+          noStroke();
+          circle(s.x, s.y, 10);
+
+          // Show time offset from now
+          if (!isPast && i < 10) {
+            // Limit text to avoid clutter
+            const deltaT = s.t - now;
+            const deltaSeconds = (deltaT / 60).toFixed(1);
+            fill(255);
+            textSize(8);
+            textAlign(CENTER, TOP);
+            text(`+${deltaSeconds}s`, s.x, s.y + 8);
+          }
+        }
+
+        // Draw schedule info box
+        const scheduleInfo = `Schedule: ${this.plannedSchedule.length} states | Start: ${this.plannedStartFrame}`;
+        fill(0, 150);
+        noStroke();
+        const boxW = textWidth(scheduleInfo) + 10;
+        rect(this.pos.x - boxW / 2, this.pos.y - 50, boxW, 15, 3);
+        fill(0, 255, 255);
+        textSize(9);
+        textAlign(CENTER, CENTER);
+        text(scheduleInfo, this.pos.x, this.pos.y - 42);
+      }
+
       pop();
     }
 
@@ -331,6 +452,45 @@ class Forklift extends Vehicle {
       textAlign(CENTER, CENTER);
       textSize(12);
       text("STOP", this.pos.x, this.pos.y - this.r * 2);
+      pop();
+    }
+
+    // Show waiting for schedule indicator
+    if (
+      Vehicle.debug &&
+      this.plannedSchedule &&
+      this.plannedSchedule.length > 0
+    ) {
+      const now = typeof frameCount !== "undefined" ? frameCount : 0;
+      const startT = this.plannedSchedule[0].t || this.plannedStartFrame || 0;
+      if (now < startT) {
+        push();
+        fill(255, 200, 0, 150);
+        noStroke();
+        circle(this.pos.x, this.pos.y, this.r * 2.5);
+        fill(255);
+        textAlign(CENTER, CENTER);
+        textSize(10);
+        const waitTime = ((startT - now) / 60).toFixed(1);
+        text(`WAIT ${waitTime}s`, this.pos.x, this.pos.y - this.r * 1.5);
+        pop();
+      }
+    }
+
+    // Show conflict/replanning indicator
+    if (Vehicle.debug && this.conflictDetected) {
+      push();
+      fill(255, 100, 0, 200);
+      noStroke();
+      circle(this.pos.x, this.pos.y, this.r * 3);
+      fill(255);
+      textAlign(CENTER, CENTER);
+      textSize(11);
+      text(
+        `REPLAN ${this.replanAttempts}/${this.maxReplanAttempts}`,
+        this.pos.x,
+        this.pos.y - this.r * 2
+      );
       pop();
     } // Dessiner la trajectoire
     this.path.forEach((p, index) => {
@@ -411,19 +571,57 @@ class Forklift extends Vehicle {
       )}) to (${targetPos.x.toFixed(0)}, ${targetPos.y.toFixed(0)})`
     );
 
-    // Clear any old reservations for this forklift
+    // Clear any old reservations for this forklift (spatial + time-aware)
     routesNetwork.clearReservations(this.id);
+    if (typeof routesNetwork.clearTimeReservationsFor === "function") {
+      routesNetwork.clearTimeReservationsFor(this.id);
+    }
 
-    // Use A* to build path through route network, passing our ID to avoid reserved paths
-    let path = routesNetwork.buildPath(this.pos, targetPos, this.id);
+    // First try time-aware planning to avoid conflicts
+    let path = null;
+    if (typeof routesNetwork.planTimeAwarePath === "function") {
+      try {
+        path = routesNetwork.planTimeAwarePath(this.pos, targetPos, this.id, {
+          speed: Math.max(0.1, this.maxSpeed || 4),
+          startFrame: typeof frameCount !== "undefined" ? frameCount : 0,
+        });
+        if (path) {
+          console.log(
+            `[Forklift ${this.id}] ✓ Time-aware plan found (states: ${
+              path.schedule ? path.schedule.length : "-"
+            })`
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[Forklift ${this.id}] Time-aware planning error, falling back:`,
+          e
+        );
+        path = null;
+      }
+    }
+
+    // Fallback: Use spatial A* to build path through route network (avoids reserved edges)
+    if (!path) {
+      path = routesNetwork.buildPath(this.pos, targetPos, this.id);
+    }
 
     if (path && path.points && path.points.length > 0) {
       this.waypoints = path.points;
       this.currentWaypointIndex = 0;
       this.hasValidPath = true;
 
-      // Reserve this path so other forklifts avoid it
-      routesNetwork.reserveWaypoints(this.waypoints, this.id);
+      // Store time-aware schedule if provided
+      this.plannedSchedule = path.schedule || null;
+      this.plannedStartFrame =
+        this.plannedSchedule && this.plannedSchedule.length > 0
+          ? this.plannedSchedule[0].t
+          : 0;
+
+      // Reserve this path spatially so other forklifts avoid it (legacy spatial reservations)
+      if (typeof routesNetwork.reserveWaypoints === "function") {
+        routesNetwork.reserveWaypoints(this.waypoints, this.id);
+      }
 
       console.log(
         `[Forklift ${this.id}] ✓ Built path with ${path.points.length} waypoints for ${this.state}`
@@ -450,6 +648,7 @@ class Forklift extends Vehicle {
       );
       this.waypoints = null;
       this.hasValidPath = false;
+      this.plannedSchedule = null;
     }
   }
 
